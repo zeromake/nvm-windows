@@ -969,12 +969,15 @@ func setup() {
 		case "npm_mirror":
 			env.npm_mirror = val
 		case "proxy":
-			if !strings.HasPrefix(val, "http://") && val != "" {
-				val = "http://" + val
-			}
-			env.proxy = val
-			if env.proxy != "none" && env.proxy != "" {
-				web.SetProxy(env.proxy, env.verifyssl)
+			if val != "none" && val != "" {
+				if !strings.HasPrefix(strings.ToLower(val), "http") {
+					val = "http://" + val
+				}
+				res, err := url.Parse(val)
+				if err == nil {
+					web.SetProxy(res.String(), env.verifyssl)
+					env.proxy = res.String()
+				}
 			}
 		case "path":
 			env.symlink = val

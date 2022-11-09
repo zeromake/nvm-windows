@@ -16,8 +16,6 @@ import (
 	"strings"
 	"syscall"
 
-	"archive/zip"
-
 	"github.com/blang/semver"
 	fs "github.com/coreybutler/go-fsutil"
 )
@@ -67,6 +65,7 @@ func GetFullNpmUrl(path string) string {
 }
 
 func Download(url string, target string, version string) bool {
+	fmt.Printf("Downlod %s\n", url)
 	output, err := os.Create(target)
 	if err != nil {
 		fmt.Println("Error while creating", target, "-", err)
@@ -199,7 +198,7 @@ func GetNodeJS(root string, v string, a string, append bool) bool {
 			// Extract the zip file
 			if strings.HasSuffix(url, ".zip") {
 				fmt.Println("Extracting node and npm...")
-				err := unzip(fileName, root+"\\v"+v)
+				err := file.Unzip(fileName, root+"\\v"+v)
 				if err != nil {
 					fmt.Println("Error extracting from Node archive: " + err.Error())
 
@@ -328,68 +327,4 @@ func getNodeUrl(v string, vpre string, arch string, append bool) string {
 		return ""
 	}
 	return url
-}
-
-func unzip(src, dest string) error {
-	r, err := zip.OpenReader(src)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := r.Close(); err != nil {
-			panic(err)
-		}
-	}()
-
-	os.MkdirAll(dest, 0755)
-
-	// Closure to address file descriptors issue with all the deferred .Close() methods
-	extractAndWriteFile := func(f *zip.File) error {
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		defer func() {
-			if err := rc.Close(); err != nil {
-				panic(err)
-			}
-		}()
-
-		path := filepath.Join(dest, f.Name)
-
-		// Check for ZipSlip (Directory traversal)
-		if !strings.HasPrefix(path, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path: %s", path)
-		}
-
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(path, f.Mode())
-		} else {
-			os.MkdirAll(filepath.Dir(path), f.Mode())
-			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-			if err != nil {
-				return err
-			}
-			defer func() {
-				if err := f.Close(); err != nil {
-					panic(err)
-				}
-			}()
-
-			_, err = io.Copy(f, rc)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	for _, f := range r.File {
-		err := extractAndWriteFile(f)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
