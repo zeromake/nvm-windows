@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"nvm/arch"
@@ -42,13 +40,10 @@ type Environment struct {
 	verifyssl       bool
 }
 
-var home = filepath.Clean(os.Getenv("NVM_HOME") + "\\settings.txt")
-var symlink = filepath.Clean(os.Getenv("NVM_SYMLINK"))
-
 var env = &Environment{
-	settings:        home,
+	settings:        "",
 	root:            "",
-	symlink:         symlink,
+	symlink:         "",
 	arch:            os.Getenv("PROCESSOR_ARCHITECTURE"),
 	node_mirror:     "",
 	npm_mirror:      "",
@@ -471,8 +466,7 @@ func uninstall(version string) {
 		fmt.Printf("Uninstalling node v" + version + "...")
 		v, _ := node.GetCurrentVersion()
 		if v == version {
-			// _, err := runElevated(fmt.Sprintf(`"%s" cmd /C rmdir "%s"`, filepath.Join(env.root, "elevate.cmd"), filepath.Clean(env.symlink)))
-			_, err := elevatedRun("rmdir", filepath.Clean(env.symlink))
+			err := os.Remove(filepath.Clean(env.symlink))
 			if err != nil {
 				fmt.Println(fmt.Sprint(err))
 				return
@@ -611,61 +605,21 @@ func use(version string, cpuarch string, reload ...bool) {
 	sym, _ := os.Stat(env.symlink)
 	if sym != nil {
 		// _, err := runElevated(fmt.Sprintf(`"%s" cmd /C rmdir "%s"`, filepath.Join(env.root, "elevate.cmd"), filepath.Clean(env.symlink)))
-		_, err := elevatedRun("rmdir", filepath.Clean(env.symlink))
+		err := os.Remove(filepath.Clean(env.symlink))
 		if err != nil {
-			if accessDenied(err) {
-				return
-			}
+			return
 		}
-
-		// // Return if the symlink already exists
-		// if ok {
-		// 	fmt.Print(err)
-		// 	return
-		// }
 	}
 
 	// Create new symlink
-	var ok bool
-	// ok, err = runElevated(fmt.Sprintf(`"%s" cmd /C mklink /D "%s" "%s"`, filepath.Join(env.root, "elevate.cmd"), filepath.Clean(env.symlink), filepath.Join(env.root, "v"+version)))
-	ok, err = elevatedRun("mklink", "/D", filepath.Clean(env.symlink), filepath.Join(env.root, "v"+version))
+	err = os.Symlink(
+		filepath.Join(env.root, "v"+version),
+		filepath.Clean(env.symlink),
+	)
 	if err != nil {
-		if strings.Contains(err.Error(), "not have sufficient privilege") || strings.Contains(strings.ToLower(err.Error()), "access is denied") {
-			// cmd := exec.Command(filepath.Join(env.root, "elevate.cmd"), "cmd", "/C", "mklink", "/D", filepath.Clean(env.symlink), filepath.Join(env.root, "v"+version))
-			// var output bytes.Buffer
-			// var _stderr bytes.Buffer
-			// cmd.Stdout = &output
-			// cmd.Stderr = &_stderr
-			// perr := cmd.Run()
-			ok, err = elevatedRun("mklink", "/D", filepath.Clean(env.symlink), filepath.Join(env.root, "v"+version))
-
-			if err != nil {
-				ok = false
-				fmt.Println(fmt.Sprint(err)) // + ": " + _stderr.String())
-			} else {
-				ok = true
-			}
-		} else if strings.Contains(err.Error(), "file already exists") {
-			ok, err = elevatedRun("rmdir", filepath.Clean(env.symlink))
-			// ok, err = runElevated(fmt.Sprintf(`"%s" cmd /C rmdir "%s"`, filepath.Join(env.root, "elevate.cmd"), filepath.Clean(env.symlink)))
-			reloadable := true
-			if len(reload) > 0 {
-				reloadable = reload[0]
-			}
-			if err != nil {
-				fmt.Println(fmt.Sprint(err))
-			} else if reloadable {
-				use(version, cpuarch, false)
-				return
-			}
-		} else {
-			fmt.Print(fmt.Sprint(err))
-		}
-	}
-	if !ok {
+		log.Println("create new link err:", err)
 		return
 	}
-
 	// Use the assigned CPU architecture
 	cpuarch = arch.Validate(cpuarch)
 	nodepath := filepath.Join(env.root, "v"+version, "node.exe")
@@ -814,15 +768,10 @@ func enable() {
 }
 
 func disable() {
-	// ok, err := runElevated(fmt.Sprintf(`"%s" cmd /C rmdir "%s"`, filepath.Join(env.root, "elevate.cmd"), filepath.Clean(env.symlink)))
-	ok, err := elevatedRun("rmdir", filepath.Clean(env.symlink))
-	if !ok {
-		return
-	}
+	err := os.Remove(filepath.Clean(env.symlink))
 	if err != nil {
 		fmt.Print(fmt.Sprint(err))
 	}
-
 	fmt.Println("nvm disabled")
 }
 
@@ -942,15 +891,6 @@ func updateRootDir(path string) {
 	}
 }
 
-func elevatedRun(name string, arg ...string) (bool, error) {
-	ok, err := run("cmd", append([]string{"/C", name}, arg...)...)
-	if err != nil {
-		ok, err = run(filepath.Join(env.root, "elevate.cmd"), append([]string{"cmd", "/C", name}, arg...)...)
-	}
-
-	return ok, err
-}
-
 func run(name string, arg ...string) (bool, error) {
 	c := exec.Command(name, arg...)
 	var stderr bytes.Buffer
@@ -958,50 +898,6 @@ func run(name string, arg ...string) (bool, error) {
 	err := c.Run()
 	if err != nil {
 		return false, errors.New(fmt.Sprint(err) + ": " + stderr.String())
-	}
-
-	return true, nil
-}
-
-func runElevated(command string, forceUAC ...bool) (bool, error) {
-	uac := true //false
-	if len(forceUAC) > 0 {
-		uac = forceUAC[0]
-	}
-
-	if uac {
-		// Alternative elevation option at stackoverflow.com/questions/31558066/how-to-ask-for-administer-privileges-on-windows-with-go
-		cmd := exec.Command(filepath.Join(env.root, "elevate.cmd"), command)
-
-		var output bytes.Buffer
-		var _stderr bytes.Buffer
-		cmd.Stdout = &output
-		cmd.Stderr = &_stderr
-		perr := cmd.Run()
-		if perr != nil {
-			return false, errors.New(fmt.Sprint(perr) + ": " + _stderr.String())
-		}
-	}
-
-	c := exec.Command("cmd") // dummy executable that actually needs to exist but we'll overwrite using .SysProcAttr
-
-	// Based on the official docs, syscall.SysProcAttr.CmdLine doesn't exist.
-	// But it does and is vital:
-	// https://github.com/golang/go/issues/15566#issuecomment-333274825
-	// https://medium.com/@felixge/killing-a-child-process-and-all-of-its-children-in-go-54079af94773
-	c.SysProcAttr = &syscall.SysProcAttr{CmdLine: command}
-
-	var stderr bytes.Buffer
-	c.Stderr = &stderr
-
-	err := c.Run()
-	if err != nil {
-		msg := stderr.String()
-		if strings.Contains(msg, "not have sufficient privilege") && uac {
-			return runElevated(command, false)
-		}
-		// fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
-		return false, errors.New(fmt.Sprint(err) + ": " + msg)
 	}
 
 	return true, nil
@@ -1034,53 +930,54 @@ func useArchitecture(a string) {
 // ===============================================================
 
 func setup() {
+	execDir := os.Getenv("NVM_HOME")
+	if execDir == "" {
+		execPath, _ := os.Executable()
+		execDir = filepath.Dir(execPath)
+	}
+	env.root = execDir
+	env.settings = filepath.Join(execDir, "settings.txt")
 	lines, err := file.ReadLines(env.settings)
 	if err != nil {
 		fmt.Println("\nERROR", err)
 		os.Exit(1)
 	}
-
+	env.symlink = filepath.Clean(os.Getenv("NVM_SYMLINK"))
 	// Process each line and extract the value
-	m := make(map[string]string)
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		line = os.ExpandEnv(line)
-		res := strings.Split(line, ":")
-		if len(res) < 2 {
+		line = strings.Trim(line, " \r\n")
+		index := strings.IndexByte(line, ':')
+		if index == -1{
 			continue
 		}
-		m[res[0]] = strings.TrimSpace(strings.Join(res[1:], ":"))
-	}
-
-	if val, ok := m["root"]; ok {
-		env.root = filepath.Clean(val)
-	}
-	if val, ok := m["originalpath"]; ok {
-		env.originalpath = filepath.Clean(val)
-	}
-	if val, ok := m["originalversion"]; ok {
-		env.originalversion = val
-	}
-	if val, ok := m["arch"]; ok {
-		env.arch = val
-	}
-	if val, ok := m["node_mirror"]; ok {
-		env.node_mirror = val
-	}
-	if val, ok := m["npm_mirror"]; ok {
-		env.npm_mirror = val
-	}
-
-	if val, ok := m["proxy"]; ok {
-		if val != "none" && val != "" {
-			if strings.ToLower(val[0:4]) != "http" {
+		key := line[:index]
+		val := strings.TrimSpace(line[index+1:])
+		if val == "" {
+			continue
+		}
+		switch key {
+		case "root":
+			env.root = val
+		case "originalpath":
+			env.originalpath = val
+		case "originalversion":
+			env.originalversion = val
+		case "arch":
+			env.arch = val
+		case "node_mirror":
+			env.node_mirror = val
+		case "npm_mirror":
+			env.npm_mirror = val
+		case "proxy":
+			if !strings.HasPrefix(val, "http://") && val != "" {
 				val = "http://" + val
 			}
-			res, err := url.Parse(val)
-			if err == nil {
-				web.SetProxy(res.String(), env.verifyssl)
-				env.proxy = res.String()
+			env.proxy = val
+			if env.proxy != "none" && env.proxy != "" {
+				web.SetProxy(env.proxy, env.verifyssl)
 			}
+		case "path":
+			env.symlink = val
 		}
 	}
 
