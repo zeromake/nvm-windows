@@ -64,6 +64,27 @@ func GetFullNpmUrl(path string) string {
 	return npmBaseAddress + path
 }
 
+func Ping(url string) bool {
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+
+	req.Header.Set("User-Agent", "NVM for Windows")
+
+	response, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+
+	if response.StatusCode == 200 {
+		return true
+	}
+
+	return false
+}
+
 func Download(url string, target string, version string) bool {
 	fmt.Printf("Downlod %s\n", url)
 	output, err := os.Create(target)
@@ -85,6 +106,7 @@ func Download(url string, target string, version string) bool {
 	response, err := client.Do(req)
 	if err != nil {
 		fmt.Println("Error while downloading", url, "-", err)
+		return false
 	}
 	defer response.Body.Close()
 	c := make(chan os.Signal, 2)
@@ -267,17 +289,17 @@ func GetRemoteTextFile(url string) string {
 		fmt.Println("\nCould not retrieve " + url + ".\n\n")
 		fmt.Printf("%s", httperr)
 		os.Exit(1)
-	} else {
-		defer response.Body.Close()
-		contents, readerr := ioutil.ReadAll(response.Body)
-		if readerr != nil {
-			fmt.Printf("%s", readerr)
-			os.Exit(1)
-		}
-		return string(contents)
 	}
-	os.Exit(1)
-	return ""
+
+	defer response.Body.Close()
+
+	contents, readerr := ioutil.ReadAll(response.Body)
+	if readerr != nil {
+		fmt.Printf("%s", readerr)
+		os.Exit(1)
+	}
+
+	return string(contents)
 }
 
 func IsNode64bitAvailable(v string) bool {

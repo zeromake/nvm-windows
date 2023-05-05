@@ -1,7 +1,7 @@
 #define MyAppName "NVM for Windows"
 #define MyAppShortName "nvm"
 #define MyAppLCShortName "nvm"
-#define MyAppVersion "1.1.10"
+#define MyAppVersion "1.1.11"
 #define MyAppPublisher "Ecor Ventures LLC"
 #define MyAppURL "https://github.com/coreybutler/nvm-windows"
 #define MyAppExeName "nvm.exe"
@@ -19,6 +19,7 @@ PrivilegesRequired=admin
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppCopyright=Copyright (C) 2018-2022 Ecor Ventures LLC, Corey Butler, and contributors.
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
@@ -38,7 +39,12 @@ ChangesEnvironment=yes
 DisableProgramGroupPage=yes
 ArchitecturesInstallIn64BitMode=x64 ia64
 UninstallDisplayIcon={app}\{#MyIcon}
-AppCopyright=Copyright (C) 2018-2021 Ecor Ventures LLC, Corey Butler, and contributors.
+VersionInfoVersion={#MyAppVersion}
+VersionInfoCopyright=Copyright (C) 2018-2022 Ecor Ventures LLC, Corey Butler, and contributors.
+VersionInfoCompany=Ecor Ventures LLC
+VersionInfoDescription=Node version manager for Windows
+VersionInfoProductName={#MyAppShortName}
+VersionInfoProductTextVersion={#MyAppVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -278,7 +284,7 @@ begin
       StringChangeEx(path,';;',';',True);
       RegWriteExpandStringValue(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'Path', path);
     end;
-    RegQueryStringValue(HKEY_CURRENT_USER,
+     RegQueryStringValue(HKEY_CURRENT_USER,
       'Environment',
       'Path', path);
     if Pos('%NVM_HOME%',path) = 0 then begin

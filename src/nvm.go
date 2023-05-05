@@ -8,23 +8,30 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"nvm/arch"
+	"nvm/encoding"
 	"nvm/file"
 	"nvm/node"
 	"nvm/web"
 
 	"github.com/blang/semver"
+	// "github.com/fatih/color"
+	"github.com/coreybutler/go-where"
 	"github.com/olekukonko/tablewriter"
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
-	NvmVersion = "1.1.10"
+	NvmVersion = "1.1.11"
 )
 
 type Environment struct {
@@ -148,6 +155,8 @@ func main() {
 		setNodeMirror(detail)
 	case "npm_mirror":
 		setNpmMirror(detail)
+	case "debug":
+		checkLocalEnvironment()
 	default:
 		help()
 	}
@@ -202,8 +211,9 @@ func getVersion(version string, cpuarch string, localInstallsOnly ...bool) (stri
 	}
 
 	// If user specifies "latest" version, find out what version is
-	if version == "latest" {
+	if version == "latest" || version == "node" {
 		version = getLatest()
+		fmt.Println(version)
 	}
 
 	if version == "lts" {
@@ -265,6 +275,13 @@ func install(version string, cpuarch string) {
 		env.verifyssl = false
 	}
 
+	if strings.HasPrefix(version, "--") {
+		fmt.Println("\"--\" prefixes are unnecessary in NVM for Windows!")
+		version = strings.ReplaceAll(version, "-", "")
+		fmt.Printf("attempting to install \"%v\" instead...\n\n", version)
+		time.Sleep(2 * time.Second)
+	}
+
 	v, a, err := getVersion(version, cpuarch)
 	version = v
 	cpuarch = a
@@ -301,7 +318,7 @@ func install(version string, cpuarch string) {
 	}
 
 	if checkVersionExceedsLatest(version) {
-		fmt.Println("Node.js v" + version + " is not yet released or available.")
+		fmt.Println("Node.js v" + version + " is not yet released or is not available.")
 		return
 	}
 
@@ -445,7 +462,7 @@ func uninstall(version string) {
 		return
 	}
 
-	if strings.ToLower(version) == "latest" {
+	if strings.ToLower(version) == "latest" || strings.ToLower(version) == "node" {
 		version = getLatest()
 	} else if strings.ToLower(version) == "lts" {
 		version = getLTS()
@@ -487,6 +504,25 @@ func uninstall(version string) {
 
 func versionNumberFrom(version string) string {
 	reg, _ := regexp.Compile("[^0-9]")
+
+	if reg.Match([]byte(version[:1])) {
+		if version[0:1] != "v" {
+			url := web.GetFullNodeUrl("latest-" + version + "/SHASUMS256.txt")
+			content := strings.Split(web.GetRemoteTextFile(url), "\n")[0]
+			if strings.Contains(content, "node") {
+				parts := strings.Split(content, "-")
+				if len(parts) > 1 {
+					if parts[1][0:1] == "v" {
+						return parts[1][1:]
+					}
+				}
+			}
+			fmt.Printf("\"%v\" is not a valid version or known alias.\n", version)
+			fmt.Println("\nAvailable aliases: latest, node (latest), lts\nNamed releases (boron, dubnium, etc) are also supported.")
+			os.Exit(0)
+		}
+	}
+
 	for reg.Match([]byte(version[:1])) {
 		version = version[1:]
 	}
@@ -559,7 +595,7 @@ func findLatestSubVersion(version string, localOnly ...bool) string {
 	url := web.GetFullNodeUrl("latest-v" + version + ".x" + "/SHASUMS256.txt")
 	content := web.GetRemoteTextFile(url)
 	re := regexp.MustCompile("node-v(.+)+msi")
-	reg := regexp.MustCompile("node-v|-x.+")
+	reg := regexp.MustCompile("node-v|-[xa].+")
 	latest := reg.ReplaceAllString(re.FindString(content), "")
 	return latest
 }
@@ -602,7 +638,7 @@ func use(version string, cpuarch string, reload ...bool) {
 	}
 
 	// Remove symlink if it already exists
-	sym, _ := os.Stat(env.symlink)
+	sym, _ := os.Lstat(env.symlink)
 	if sym != nil {
 		// _, err := runElevated(fmt.Sprintf(`"%s" cmd /C rmdir "%s"`, filepath.Join(env.root, "elevate.cmd"), filepath.Clean(env.symlink)))
 		err := os.Remove(filepath.Clean(env.symlink))
@@ -775,12 +811,215 @@ func disable() {
 	fmt.Println("nvm disabled")
 }
 
+func checkLocalEnvironment() {
+	problems := make([]string, 0)
+
+	// Check for PATH problems
+	paths := strings.Split(os.Getenv("PATH"), ";")
+	current := env.symlink
+	if strings.HasSuffix(current, "/") || strings.HasSuffix(current, "\\") {
+		current = current[:len(current)-1]
+	}
+
+	nvmsymlinkfound := false
+	for _, path := range paths {
+		if strings.HasSuffix(path, "/") || strings.HasSuffix(path, "\\") {
+			path = path[:len(path)-1]
+		}
+
+		if strings.EqualFold(path, current) {
+			nvmsymlinkfound = true
+			break
+		}
+
+		if _, err := os.Stat(filepath.Join(path, "node.exe")); err == nil {
+			problems = append(problems, "Another Node.js installation is blocking NVM4W installations from running. Please uninstall the conflicting version or update the PATH environment variable to assure \""+current+"\" precedes \""+path+"\".")
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			fmt.Println("Error running environment check:\n" + err.Error())
+		}
+	}
+
+	// Check for developer mode
+	devmode := "OFF"
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock`, registry.QUERY_VALUE)
+	if err == nil {
+		value, _, err := k.GetIntegerValue("AllowDevelopmentWithoutDevLicense")
+		if err == nil {
+			if value > 0 {
+				devmode = "ON"
+			}
+		} else {
+			devmode = "UNKNOWN"
+		}
+	} else {
+		devmode = "UNKNOWN (user cannot read registry)"
+	}
+	defer k.Close()
+
+	// Check for permission problems
+	admin, elevated, err := getProcessPermissions()
+	if err == nil {
+		if !admin && !elevated {
+			user, _ := user.Current()
+			username := strings.Split(user.Username, "\\")
+			fmt.Printf("%v is not using admin or elevated rights", username[len(username)-1])
+			if devmode == "ON" {
+				fmt.Printf(", but windows developer mode is\nenabled. Most commands will still work unless %v lacks rights to\nmodify the %v symlink.\n", username[len(username)-1], current)
+			} else {
+				fmt.Println(".")
+			}
+		} else {
+			if admin {
+				fmt.Println("Running NVM for Windows with administrator privileges.")
+			} else if elevated {
+				fmt.Println("Running NVM for Windows with elevated permissions.")
+			}
+		}
+	} else {
+		fmt.Println(err)
+	}
+
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	handle, _, err := kernel32.NewProc("GetStdHandle").Call(uintptr(0xfffffff5)) // get handle for console input
+	if err != nil && err.Error() != "The operation completed successfully." {
+		fmt.Printf("Error getting console handle: %v", err)
+	} else {
+		var mode uint32
+		result, _, _ := kernel32.NewProc("GetConsoleMode").Call(handle, uintptr(unsafe.Pointer(&mode)))
+		if result != 0 {
+			var title [256]uint16
+			_, _, err := kernel32.NewProc("GetConsoleTitleW").Call(uintptr(unsafe.Pointer(&title)), uintptr(len(title)))
+			if err != nil && err.Error() != "The operation completed successfully." {
+				fmt.Printf("Error getting console title: %v", err)
+			} else {
+				consoleTitle := syscall.UTF16ToString(title[:])
+
+				if !strings.Contains(strings.ToLower(consoleTitle), "command prompt") && !strings.Contains(strings.ToLower(consoleTitle), "powershell") {
+					problems = append(problems, fmt.Sprintf("\"%v\" is not an officially supported shell. Some features may not work as expected.\n", consoleTitle))
+				}
+
+				fmt.Printf("\n%v", consoleTitle)
+			}
+		}
+	}
+
+	// SHELL in Linux
+	// TERM in Windows
+	// COMSPEC in Windows provides the terminal path
+	// shell := os.Getenv("ConEmuANSI")
+	// fmt.Printf("Shell: %v\n", shell)
+
+	// Display developer mode status
+	if !admin {
+		// if devmode == "ON" {
+		// 	devmode = color.GreenString(devmode)
+		// } else if devmode == "OFF" {
+		// 	devmode = color.YellowString(devmode)
+		// } else {
+		// 	devmode = color.YellowString(devmode)
+		// }
+
+		fmt.Printf("\n%v %v\n", "Windows Developer Mode:", devmode)
+	}
+
+	executable := os.Args[0]
+	path, err := where.Find(filepath.Base(executable))
+
+	if err != nil {
+		path = "UNKNOWN: " + err.Error()
+	}
+
+	out := "none\n(run \"nvm use <version>\" to activate a version)\n"
+	output, err := exec.Command(os.Getenv("NVM_SYMLINK")+"\\node.exe", "-v").Output()
+	if err == nil {
+		out = string(output)
+	}
+
+	nvmhome := os.Getenv("NVM_HOME")
+	fmt.Printf("\nNVM4W Version:      %v\nNVM4W Path:         %v\nNVM4W Settings:     %v\nNVM_HOME:           %v\nNVM_SYMLINK:        %v\nNode Installations: %v\n\nActive Node.js Version: %v", NvmVersion, path, home, nvmhome, symlink, env.root, out)
+
+	if !nvmsymlinkfound {
+		problems = append(problems, "The NVM4W symlink ("+env.symlink+") was not found in the PATH environment variable.")
+	}
+
+	if home == symlink {
+		problems = append(problems, "NVM_HOME and NVM_SYMLINK cannot be the same value ("+symlink+"). Change NVM_SYMLINK.")
+	}
+
+	nodelist := web.Ping(web.GetFullNodeUrl("index.json"))
+	if !nodelist {
+		if len(env.node_mirror) > 0 && env.node_mirror != "none" {
+			problems = append(problems, "Connection to "+env.node_mirror+" (mirror) cannot be established. Check the mirror server to assure it is online.")
+		} else {
+			if len(env.proxy) > 0 {
+				problems = append(problems, "Connection to nodejs.org cannot be established. Check your proxy ("+env.proxy+") and your physical internet connection.")
+			} else {
+				problems = append(problems, "Connection to nodejs.org cannot be established. Check your internet connection.")
+			}
+		}
+	}
+
+	v := node.GetInstalled(env.root)
+	invalid := make([]string, 0)
+	invalidnpm := make([]string, 0)
+	for i := 0; i < len(v); i++ {
+		if _, err = os.Stat(filepath.Join(env.root, v[i], "node.exe")); err != nil {
+			invalid = append(invalid, v[i])
+		} else if _, err = os.Stat(filepath.Join(env.root, v[i], "npm.cmd")); err != nil {
+			invalidnpm = append(invalid, v[i])
+		}
+	}
+
+	if len(invalid) > 0 {
+		problems = append(problems, "The following Node installations are invalid (missing node.exe): "+strings.Join(invalid, ", ")+" - consider reinstalling these versions")
+	}
+
+	if len(invalidnpm) > 0 {
+		fmt.Printf("\nWARNING: The following Node installations are missing npm: %v\n         (Node will still run, but npm will not work on these versions)\n", strings.Join(invalidnpm, ", "))
+	}
+
+	if len(env.npm_mirror) > 0 {
+		fmt.Println("If you are experiencing npm problems, check the npm mirror (" + env.npm_mirror + ") to assure it is online and accessible.")
+	}
+
+	if _, err := os.Stat(env.settings); err != nil {
+		problems = append(problems, "Cannot find "+env.settings)
+	}
+
+	if len(problems) == 0 {
+		fmt.Println("\n" + "No problems detected.")
+	} else {
+		// fmt.Println("")
+		// table := tablewriter.NewWriter(os.Stdout)
+		// table.SetHeader([]string{"#", "Problems Detected"})
+		// table.SetColMinWidth(1, 40)
+		// table.SetAutoWrapText(false)
+		// // table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
+		// // table.SetAlignment(tablewriter.ALIGN_LEFT)
+		// // table.SetCenterSeparator("|")
+		// data := make([][]string, 0)
+		// for i := 0; i < len(problems); i++ {
+		// 	data = append(data, []string{fmt.Sprintf(" %v ", i+1), problems[i]})
+		// }
+		// table.AppendBulk(data) // Add Bulk Data
+		// table.Render()
+		fmt.Println("\nPROBLEMS DETECTED\n-----------------")
+		for _, p := range problems {
+			fmt.Println(p + "\n")
+		}
+	}
+
+	fmt.Println("\n" + "Find help at https://github.com/coreybutler/nvm-windows/wiki/Common-Issues")
+}
+
 func help() {
 	fmt.Println("\nRunning version " + NvmVersion + ".")
 	fmt.Println("\nUsage:")
 	fmt.Println(" ")
 	fmt.Println("  nvm arch                     : Show if node is running in 32 or 64 bit mode.")
 	fmt.Println("  nvm current                  : Display active version.")
+	fmt.Println("  nvm debug                    : Check the NVM4W process for known problems (troubleshooter).")
 	fmt.Println("  nvm install <version> [arch] : The version can be a specific version, \"latest\" for the latest current version, or \"lts\" for the")
 	fmt.Println("                                 most recent LTS version. Optionally specify whether to install the 32 or 64 bit version (defaults")
 	fmt.Println("                                 to system arch). Set [arch] to \"all\" to install 32 AND 64 bit versions.")
@@ -815,7 +1054,7 @@ func checkVersionExceedsLatest(version string) bool {
 	url := web.GetFullNodeUrl("latest/SHASUMS256.txt")
 	content := web.GetRemoteTextFile(url)
 	re := regexp.MustCompile("node-v(.+)+msi")
-	reg := regexp.MustCompile("node-v|-x.+")
+	reg := regexp.MustCompile("node-v|-[xa].+")
 	latest := reg.ReplaceAllString(re.FindString(content), "")
 	var vArr = strings.Split(version, ".")
 	var lArr = strings.Split(latest, ".")
@@ -860,7 +1099,7 @@ func getLatest() string {
 	url := web.GetFullNodeUrl("latest/SHASUMS256.txt")
 	content := web.GetRemoteTextFile(url)
 	re := regexp.MustCompile("node-v(.+)+msi")
-	reg := regexp.MustCompile("node-v|-x.+")
+	reg := regexp.MustCompile("node-v|-[xa].+")
 	return reg.ReplaceAllString(re.FindString(content), "")
 }
 
@@ -904,27 +1143,44 @@ func run(name string, arg ...string) (bool, error) {
 }
 
 func saveSettings() {
-	content := "root: " + strings.Trim(env.root, " \n\r") + "\r\narch: " + strings.Trim(env.arch, " \n\r") + "\r\nproxy: " + strings.Trim(env.proxy, " \n\r") + "\r\noriginalpath: " + strings.Trim(env.originalpath, " \n\r") + "\r\noriginalversion: " + strings.Trim(env.originalversion, " \n\r")
-	content = content + "\r\nnode_mirror: " + strings.Trim(env.node_mirror, " \n\r") + "\r\nnpm_mirror: " + strings.Trim(env.npm_mirror, " \n\r")
+	content := "root: " + strings.Trim(encode(env.root), " \n\r") + "\r\narch: " + strings.Trim(encode(env.arch), " \n\r") + "\r\nproxy: " + strings.Trim(encode(env.proxy), " \n\r") + "\r\noriginalpath: " + strings.Trim(encode(env.originalpath), " \n\r") + "\r\noriginalversion: " + strings.Trim(encode(env.originalversion), " \n\r")
+	content = content + "\r\nnode_mirror: " + strings.Trim(encode(env.node_mirror), " \n\r") + "\r\nnpm_mirror: " + strings.Trim(encode(env.npm_mirror), " \n\r")
 	ioutil.WriteFile(env.settings, []byte(content), 0644)
 }
 
-// NOT USED?
-/*
-func useArchitecture(a string) {
-  if strings.ContainsAny("32",os.Getenv("PROCESSOR_ARCHITECTURE")) {
-    fmt.Println("This computer only supports 32-bit processing.")
-    return
-  }
-  if a == "32" || a == "64" {
-    env.arch = a
-    saveSettings()
-    fmt.Println("Set to "+a+"-bit mode.")
-  } else {
-    fmt.Println("Cannot set architecture to "+a+". Must be 32 or 64 are acceptable values.")
-  }
+func getProcessPermissions() (admin bool, elevated bool, err error) {
+	admin = false
+	elevated = false
+	var sid *windows.SID
+	err = windows.AllocateAndInitializeSid(
+		&windows.SECURITY_NT_AUTHORITY,
+		2,
+		windows.SECURITY_BUILTIN_DOMAIN_RID,
+		windows.DOMAIN_ALIAS_RID_ADMINS,
+		0, 0, 0, 0, 0, 0,
+		&sid)
+	if err != nil {
+		return
+	}
+	defer windows.FreeSid(sid)
+
+	token := windows.Token(0)
+	elevated = token.IsElevated()
+	admin, err = token.IsMember(sid)
+
+	return
 }
-*/
+
+func encode(val string) string {
+	converted := encoding.ToUTF8(val)
+	// if err != nil {
+	// 	fmt.Printf("WARNING: [encoding error] - %v\n", err.Error())
+	// 	return val
+	// }
+
+	return string(converted)
+}
+
 // ===============================================================
 // END | Utility functions
 // ===============================================================

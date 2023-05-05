@@ -20,6 +20,7 @@ _cgo_export.*
 _testmain.go
 
 *.exe
+!utilities/**/*.exe
 *.test
 *.prof
 
@@ -32,4 +33,5 @@ bin/nvm/*
 
 !.gitignore
 !.gitattributes
+tests
 .idea
