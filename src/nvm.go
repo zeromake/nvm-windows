@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -23,7 +25,7 @@ import (
 	"nvm/web"
 
 	"github.com/blang/semver"
-	// "github.com/fatih/color"
+
 	"github.com/coreybutler/go-where"
 	"github.com/olekukonko/tablewriter"
 	"golang.org/x/sys/windows"
@@ -591,12 +593,7 @@ func findLatestSubVersion(version string, localOnly ...bool) string {
 		}
 		return fmt.Sprintf("%v.%v.%v", requested["major"], requested["minor"], requested["patch"])
 	}
-
-	url := web.GetFullNodeUrl("latest-v" + version + ".x" + "/SHASUMS256.txt")
-	content := web.GetRemoteTextFile(url)
-	re := regexp.MustCompile("node-v(.+)+msi")
-	reg := regexp.MustCompile("node-v|-[xa].+")
-	latest := reg.ReplaceAllString(re.FindString(content), "")
+	latest := getRemoteVersion(version)
 	return latest
 }
 
@@ -937,14 +934,14 @@ func checkLocalEnvironment() {
 	}
 
 	nvmhome := os.Getenv("NVM_HOME")
-	fmt.Printf("\nNVM4W Version:      %v\nNVM4W Path:         %v\nNVM4W Settings:     %v\nNVM_HOME:           %v\nNVM_SYMLINK:        %v\nNode Installations: %v\n\nActive Node.js Version: %v", NvmVersion, path, home, nvmhome, symlink, env.root, out)
+	fmt.Printf("\nNVM4W Version:      %v\nNVM4W Path:         %v\nNVM4W Settings:     %v\nNVM_HOME:           %v\nNVM_SYMLINK:        %v\nNode Installations: %v\n\nActive Node.js Version: %v", NvmVersion, path, env.settings, nvmhome, env.symlink, env.root, out)
 
 	if !nvmsymlinkfound {
 		problems = append(problems, "The NVM4W symlink ("+env.symlink+") was not found in the PATH environment variable.")
 	}
 
-	if home == symlink {
-		problems = append(problems, "NVM_HOME and NVM_SYMLINK cannot be the same value ("+symlink+"). Change NVM_SYMLINK.")
+	if env.settings == env.symlink {
+		problems = append(problems, "NVM_HOME and NVM_SYMLINK cannot be the same value ("+env.symlink+"). Change NVM_SYMLINK.")
 	}
 
 	nodelist := web.Ping(web.GetFullNodeUrl("index.json"))
@@ -1049,18 +1046,18 @@ func help() {
 // ===============================================================
 // BEGIN | Utility functions
 // ===============================================================
+
 func checkVersionExceedsLatest(version string) bool {
-	//content := web.GetRemoteTextFile("http://nodejs.org/dist/latest/SHASUMS256.txt")
-	url := web.GetFullNodeUrl("latest/SHASUMS256.txt")
-	content := web.GetRemoteTextFile(url)
-	re := regexp.MustCompile("node-v(.+)+msi")
-	reg := regexp.MustCompile("node-v|-[xa].+")
-	latest := reg.ReplaceAllString(re.FindString(content), "")
+	latest := getLatest()
 	var vArr = strings.Split(version, ".")
 	var lArr = strings.Split(latest, ".")
 	for index := range lArr {
-		lat, _ := strconv.Atoi(lArr[index])
-		ver, _ := strconv.Atoi(vArr[index])
+		var lat = 0
+		var ver = 0
+		lat, _ = strconv.Atoi(lArr[index])
+		if len(vArr) > index {
+			ver, _ = strconv.Atoi(vArr[index])
+		}
 		//Should check for valid input (checking for conversion errors) but this tool is made to trust the user
 		if ver < lat {
 			return false
@@ -1096,11 +1093,19 @@ func getNpmVersion(nodeversion string) string {
 }
 
 func getLatest() string {
-	url := web.GetFullNodeUrl("latest/SHASUMS256.txt")
-	content := web.GetRemoteTextFile(url)
-	re := regexp.MustCompile("node-v(.+)+msi")
-	reg := regexp.MustCompile("node-v|-[xa].+")
-	return reg.ReplaceAllString(re.FindString(content), "")
+	return getRemoteVersion("")
+}
+
+var remoteVersionRe = regexp.MustCompile(`node-v(\d+(?:\.\d+)+)-.+\.msi`)
+
+func getRemoteVersion(version string) string {
+	nodePath := "latest/SHASUMS256.txt"
+	if version != "" {
+		nodePath = "latest-v" + version + ".x" + "/SHASUMS256.txt"
+	}
+	nodeUrl := web.GetFullNodeUrl(nodePath)
+	content := web.GetRemoteTextFile(nodeUrl)
+	return remoteVersionRe.FindStringSubmatch(content)[1]
 }
 
 func getLTS() string {
@@ -1203,7 +1208,7 @@ func setup() {
 	for _, line := range lines {
 		line = strings.Trim(line, " \r\n")
 		index := strings.IndexByte(line, ':')
-		if index == -1{
+		if index == -1 {
 			continue
 		}
 		key := line[:index]
